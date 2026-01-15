@@ -13,26 +13,31 @@
 </head>
 <body class="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 p-4 md:p-6">
   
-  <!-- Config Modal (shows if Supabase not configured) -->
+  <!-- Config Modal -->
   <div id="configModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
     <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-      <h2 class="text-xl font-bold mb-4">Configure Supabase</h2>
-      <p class="text-sm text-gray-600 mb-4">Enter your Supabase credentials. You only need to do this once.</p>
-      <div class="space-y-3">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Supabase URL</label>
-          <input type="text" id="configUrl" placeholder="https://xxxxx.supabase.co" 
-                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <h2 class="text-xl font-bold mb-4">Settings</h2>
+      
+      <div class="mb-6">
+        <h3 class="font-semibold text-gray-700 mb-2">Supabase Database</h3>
+        <p class="text-sm text-gray-600 mb-3">Required for the app to work across devices.</p>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Supabase URL</label>
+            <input type="text" id="configUrl" placeholder="https://xxxxx.supabase.co" 
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Supabase Publishable Key</label>
+            <input type="text" id="configKey" placeholder="sb_publishable_xxx..." 
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          </div>
         </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Supabase Anon Key</label>
-          <input type="text" id="configKey" placeholder="eyJhbGc..." 
-                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
-        </div>
-        <button onclick="saveConfig()" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-          Save & Connect
-        </button>
       </div>
+
+      <button onclick="saveConfig()" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+        Save & Connect
+      </button>
     </div>
   </div>
 
@@ -93,6 +98,7 @@
     function saveConfig() {
       const url = document.getElementById('configUrl').value.trim();
       const key = document.getElementById('configKey').value.trim();
+      
       if (url && key) {
         localStorage.setItem('supabase_url', url);
         localStorage.setItem('supabase_key', key);
@@ -169,77 +175,120 @@
       const name = input.value.trim();
       if (!name) return;
       
-      const { data, error } = await supabaseClient.from('people').insert({ name }).select().single();
-      if (!error) {
+      try {
+        const { data, error } = await supabaseClient.from('people').insert({ name }).select().single();
+        if (error) throw error;
         state.people.push(data);
         input.value = '';
         render();
+      } catch (error) {
+        console.error('Error adding person:', error);
+        alert('Error adding person: ' + error.message);
       }
     }
 
     async function removePerson(id) {
-      if (!confirm('Remove this person? They will also be removed from all queues and groups.')) return;
-      await supabaseClient.from('people').delete().eq('id', id);
-      state.people = state.people.filter(p => p.id !== id);
-      state.trashQueue = state.trashQueue.filter(t => t.person_id !== id);
-      state.birthdays = state.birthdays.filter(b => b.person_id !== id);
-      render();
+      try {
+        if (!confirm('Remove this person? They will also be removed from all queues and groups.')) return;
+        await supabaseClient.from('people').delete().eq('id', id);
+        state.people = state.people.filter(p => p.id !== id);
+        state.trashQueue = state.trashQueue.filter(t => t.person_id !== id);
+        state.birthdays = state.birthdays.filter(b => b.person_id !== id);
+        state.cleaningGroups = state.cleaningGroups.map(g => ({
+          ...g,
+          members: g.members.filter(m => m !== id)
+        })).filter(g => g.members.length > 0);
+        render();
+      } catch (error) {
+        console.error('Error removing person:', error);
+        alert('Error removing person: ' + error.message);
+      }
     }
 
     // Trash functions
     async function addToTrashQueue(personId) {
-      const position = state.trashQueue.length;
-      const { data, error } = await supabaseClient.from('trash_queue').insert({ person_id: personId, position }).select().single();
-      if (!error) {
+      try {
+        const position = state.trashQueue.length;
+        const { data, error } = await supabaseClient.from('trash_queue').insert({ person_id: personId, position }).select().single();
+        if (error) throw error;
         state.trashQueue.push(data);
         render();
+      } catch (error) {
+        console.error('Error adding to queue:', error);
+        alert('Error adding to queue: ' + error.message);
       }
     }
 
     async function insertIntoTrashQueue(personId, afterIndex) {
-      // Shift positions of items after insertion point
-      const newQueue = [...state.trashQueue];
-      for (let i = afterIndex; i < newQueue.length; i++) {
-        newQueue[i].position = i + 1;
+      try {
+        const newItem = { person_id: personId, position: afterIndex };
+        
+        // Clear and rebuild the queue in database
+        await supabaseClient.from('trash_queue').delete().neq('id', 0);
+        
+        const inserts = [
+          ...state.trashQueue.slice(0, afterIndex).map((q, i) => ({ person_id: q.person_id, position: i })),
+          newItem,
+          ...state.trashQueue.slice(afterIndex).map((q, i) => ({ person_id: q.person_id, position: afterIndex + 1 + i }))
+        ];
+        
+        const { data, error } = await supabaseClient.from('trash_queue').insert(inserts).select();
+        if (error) throw error;
+        state.trashQueue = data || [];
+        render();
+      } catch (error) {
+        console.error('Error inserting into queue:', error);
+        alert('Error inserting into queue: ' + error.message);
       }
-      
-      // Insert new item
-      const newItem = { person_id: personId, position: afterIndex };
-      
-      // Update database
-      await supabaseClient.from('trash_queue').delete().neq('id', 0); // Clear all
-      const inserts = [...newQueue.slice(0, afterIndex).map((q, i) => ({ person_id: q.person_id, position: i })),
-                       newItem,
-                       ...newQueue.slice(afterIndex).map((q, i) => ({ person_id: q.person_id, position: afterIndex + 1 + i }))];
-      
-      const { data } = await supabaseClient.from('trash_queue').insert(inserts).select();
-      state.trashQueue = data || [];
-      render();
     }
 
     async function removeFromTrashQueue(id) {
-      await supabaseClient.from('trash_queue').delete().eq('id', id);
-      state.trashQueue = state.trashQueue.filter(t => t.id !== id);
-      // Reorder positions
-      for (let i = 0; i < state.trashQueue.length; i++) {
-        state.trashQueue[i].position = i;
-        await supabaseClient.from('trash_queue').update({ position: i }).eq('id', state.trashQueue[i].id);
+      try {
+        await supabaseClient.from('trash_queue').delete().eq('id', id);
+        state.trashQueue = state.trashQueue.filter(t => t.id !== id);
+        // Reorder positions
+        for (let i = 0; i < state.trashQueue.length; i++) {
+          state.trashQueue[i].position = i;
+          await supabaseClient.from('trash_queue').update({ position: i }).eq('id', state.trashQueue[i].id);
+        }
+        render();
+      } catch (error) {
+        console.error('Error removing from queue:', error);
+        alert('Error removing from queue: ' + error.message);
       }
-      render();
     }
 
     async function markTrashDone() {
-      const today = new Date().toISOString().split('T')[0];
-      const currentPerson = state.trashQueue[0]?.person_id;
-      
-      // Upsert completion
-      await supabaseClient.from('trash_completions').upsert({ 
-        completed_date: today, 
-        completed_by: currentPerson 
-      }, { onConflict: 'completed_date' });
-      
-      state.trashCompletion = { completed_date: today, completed_by: currentPerson };
-      render();
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const currentPerson = state.trashQueue[0]?.person_id;
+        
+        // Save who completed it today
+        await supabaseClient.from('trash_completions').upsert({ 
+          completed_date: today, 
+          completed_by: currentPerson 
+        }, { onConflict: 'completed_date' });
+        
+        state.trashCompletion = { completed_date: today, completed_by: currentPerson };
+        
+        // Rotate the queue: move first person to the end
+        if (state.trashQueue.length > 1) {
+          const [first, ...rest] = state.trashQueue;
+          const newQueue = [...rest, first];
+          
+          // Update positions in database
+          for (let i = 0; i < newQueue.length; i++) {
+            await supabaseClient.from('trash_queue').update({ position: i }).eq('id', newQueue[i].id);
+            newQueue[i].position = i;
+          }
+          state.trashQueue = newQueue;
+        }
+        
+        render();
+      } catch (error) {
+        console.error('Error marking trash done:', error);
+        alert('Error marking trash done: ' + error.message);
+      }
     }
 
     function isTrashCompletedToday() {
@@ -248,136 +297,202 @@
       return state.trashCompletion.completed_date === today;
     }
 
-    async function rotateTrashQueueIfNeeded() {
-      if (!state.trashCompletion || state.trashQueue.length < 2) return;
-      
-      const today = new Date().toISOString().split('T')[0];
-      const lastCompleted = state.trashCompletion.completed_date;
-      
-      if (lastCompleted && lastCompleted < today) {
-        // Rotate: move first to end
-        const [first, ...rest] = state.trashQueue;
-        const newQueue = [...rest, first];
-        
-        // Update positions in database
-        for (let i = 0; i < newQueue.length; i++) {
-          await supabaseClient.from('trash_queue').update({ position: i }).eq('id', newQueue[i].id);
-          newQueue[i].position = i;
+    async function unmarkTrashDone() {
+      try {
+        // Move the last person (who just completed) back to the front
+        if (state.trashQueue.length > 1) {
+          const last = state.trashQueue.pop();
+          state.trashQueue.unshift(last);
+          
+          // Update positions in database
+          for (let i = 0; i < state.trashQueue.length; i++) {
+            await supabaseClient.from('trash_queue').update({ position: i }).eq('id', state.trashQueue[i].id);
+            state.trashQueue[i].position = i;
+          }
         }
-        state.trashQueue = newQueue;
+        
+        // Delete today's completion
+        const today = new Date().toISOString().split('T')[0];
+        await supabaseClient.from('trash_completions').delete().eq('completed_date', today);
+        state.trashCompletion = null;
+        
+        render();
+      } catch (error) {
+        console.error('Error unmarking trash:', error);
+        alert('Error unmarking trash: ' + error.message);
+      }
+    }
+
+    async function rotateTrashQueueIfNeeded() {
+      // Clear yesterday's completion status on new day
+      if (state.trashCompletion) {
+        const today = new Date().toISOString().split('T')[0];
+        if (state.trashCompletion.completed_date < today) {
+          state.trashCompletion = null;
+        }
       }
     }
 
     // Cleaning groups functions
     async function createCleaningGroup() {
-      const nameInput = document.getElementById('newGroupName');
-      const name = nameInput.value.trim();
-      const checkboxes = document.querySelectorAll('.group-member-checkbox:checked');
-      const memberIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
-      
-      if (!name || memberIds.length === 0) return;
-      
-      const { data: group, error } = await supabaseClient.from('cleaning_groups').insert({ name }).select().single();
-      if (error) return;
-      
-      const memberInserts = memberIds.map(person_id => ({ group_id: group.id, person_id }));
-      await supabaseClient.from('cleaning_group_members').insert(memberInserts);
-      
-      state.cleaningGroups.push({ ...group, members: memberIds });
-      nameInput.value = '';
-      render();
+      try {
+        const nameInput = document.getElementById('newGroupName');
+        const name = nameInput.value.trim();
+        const checkboxes = document.querySelectorAll('.group-member-checkbox:checked');
+        const memberIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+        
+        if (!name || memberIds.length === 0) return;
+        
+        const { data: group, error } = await supabaseClient.from('cleaning_groups').insert({ name }).select().single();
+        if (error) throw error;
+        
+        const memberInserts = memberIds.map(person_id => ({ group_id: group.id, person_id }));
+        await supabaseClient.from('cleaning_group_members').insert(memberInserts);
+        
+        state.cleaningGroups.push({ ...group, members: memberIds });
+        nameInput.value = '';
+        
+        // Uncheck all checkboxes
+        checkboxes.forEach(cb => cb.checked = false);
+        
+        render();
+      } catch (error) {
+        console.error('Error creating group:', error);
+        alert('Error creating group: ' + error.message);
+      }
     }
 
     async function removeCleaningGroup(id) {
-      await supabaseClient.from('cleaning_groups').delete().eq('id', id);
-      state.cleaningGroups = state.cleaningGroups.filter(g => g.id !== id);
-      render();
+      try {
+        await supabaseClient.from('cleaning_groups').delete().eq('id', id);
+        state.cleaningGroups = state.cleaningGroups.filter(g => g.id !== id);
+        if (state.cleaningSettings.start_group_id === id) {
+          state.cleaningSettings.start_group_id = null;
+          state.cleaningSettings.start_date = null;
+          await supabaseClient.from('cleaning_settings').update({ start_date: null, start_group_id: null }).eq('id', 1);
+        }
+        render();
+      } catch (error) {
+        console.error('Error removing group:', error);
+        alert('Error removing group: ' + error.message);
+      }
     }
 
     async function saveCleaningSettings() {
-      const startDate = document.getElementById('cleaningStartDate').value;
-      const startGroupId = parseInt(document.getElementById('cleaningStartGroup').value);
-      
-      await supabaseClient.from('cleaning_settings').update({ 
-        start_date: startDate || null, 
-        start_group_id: startGroupId || null 
-      }).eq('id', 1);
-      
-      state.cleaningSettings = { start_date: startDate, start_group_id: startGroupId };
-      render();
+      try {
+        const startDate = document.getElementById('cleaningStartDate').value;
+        const startGroupId = parseInt(document.getElementById('cleaningStartGroup').value);
+        
+        await supabaseClient.from('cleaning_settings').update({ 
+          start_date: startDate || null, 
+          start_group_id: startGroupId || null 
+        }).eq('id', 1);
+        
+        state.cleaningSettings = { start_date: startDate || null, start_group_id: startGroupId || null };
+        render();
+      } catch (error) {
+        console.error('Error saving settings:', error);
+        alert('Error saving settings: ' + error.message);
+      }
     }
 
     async function postponeCleaning(originalDate, newDate, groupId, groupName) {
-      const { data, error } = await supabaseClient.from('cleaning_postponements').insert({
-        original_date: originalDate,
-        new_date: newDate,
-        group_id: groupId,
-        group_name: groupName
-      }).select().single();
-      
-      if (!error) {
+      try {
+        const { data, error } = await supabaseClient.from('cleaning_postponements').insert({
+          original_date: originalDate,
+          new_date: newDate,
+          group_id: groupId,
+          group_name: groupName
+        }).select().single();
+        
+        if (error) throw error;
         state.cleaningPostponements.push(data);
         render();
+      } catch (error) {
+        console.error('Error postponing:', error);
+        alert('Error postponing: ' + error.message);
       }
     }
 
     async function cancelPostponement(id) {
-      await supabaseClient.from('cleaning_postponements').delete().eq('id', id);
-      state.cleaningPostponements = state.cleaningPostponements.filter(p => p.id !== id);
-      render();
+      try {
+        await supabaseClient.from('cleaning_postponements').delete().eq('id', id);
+        state.cleaningPostponements = state.cleaningPostponements.filter(p => p.id !== id);
+        render();
+      } catch (error) {
+        console.error('Error canceling postponement:', error);
+        alert('Error canceling postponement: ' + error.message);
+      }
     }
 
     // Birthday functions
     async function setBirthday(personId, date) {
-      if (!date) {
-        await supabaseClient.from('birthdays').delete().eq('person_id', personId);
-        state.birthdays = state.birthdays.filter(b => b.person_id !== personId);
-      } else {
-        const existing = state.birthdays.find(b => b.person_id === personId);
-        if (existing) {
-          await supabaseClient.from('birthdays').update({ birth_date: date }).eq('person_id', personId);
-          existing.birth_date = date;
+      try {
+        if (!date) {
+          await supabaseClient.from('birthdays').delete().eq('person_id', personId);
+          state.birthdays = state.birthdays.filter(b => b.person_id !== personId);
         } else {
-          const { data } = await supabaseClient.from('birthdays').insert({ person_id: personId, birth_date: date }).select().single();
-          if (data) state.birthdays.push(data);
+          const existing = state.birthdays.find(b => b.person_id === personId);
+          if (existing) {
+            await supabaseClient.from('birthdays').update({ birth_date: date }).eq('person_id', personId);
+            existing.birth_date = date;
+          } else {
+            const { data, error } = await supabaseClient.from('birthdays').insert({ person_id: personId, birth_date: date }).select().single();
+            if (error) throw error;
+            if (data) state.birthdays.push(data);
+          }
         }
+        render();
+      } catch (error) {
+        console.error('Error setting birthday:', error);
+        alert('Error setting birthday: ' + error.message);
       }
-      render();
     }
 
     // Vitalnya functions
     async function addVitalnyaBooking() {
-      const date = document.getElementById('vitalnyaDate').value;
-      const timeStart = document.getElementById('vitalnyaTimeStart').value;
-      const timeEnd = document.getElementById('vitalnyaTimeEnd').value;
-      const name = document.getElementById('vitalnyaName').value.trim();
-      const strict = document.getElementById('vitalnyaStrict').checked;
-      
-      if (!date || !timeStart || !timeEnd || !name) return;
-      
-      const { data, error } = await supabaseClient.from('vitalnya_bookings').insert({
-        booking_date: date,
-        time_start: timeStart,
-        time_end: timeEnd,
-        name,
-        strict
-      }).select().single();
-      
-      if (!error) {
+      try {
+        const date = document.getElementById('vitalnyaDate').value;
+        const timeStart = document.getElementById('vitalnyaTimeStart').value;
+        const timeEnd = document.getElementById('vitalnyaTimeEnd').value;
+        const name = document.getElementById('vitalnyaName').value.trim();
+        const strict = document.getElementById('vitalnyaStrict').checked;
+        
+        if (!date || !timeStart || !timeEnd || !name) return;
+        
+        const { data, error } = await supabaseClient.from('vitalnya_bookings').insert({
+          booking_date: date,
+          time_start: timeStart,
+          time_end: timeEnd,
+          name,
+          strict
+        }).select().single();
+        
+        if (error) throw error;
         state.vitalnyaBookings.push(data);
+        
         document.getElementById('vitalnyaDate').value = '';
         document.getElementById('vitalnyaTimeStart').value = '';
         document.getElementById('vitalnyaTimeEnd').value = '';
         document.getElementById('vitalnyaName').value = '';
         document.getElementById('vitalnyaStrict').checked = false;
+        
         render();
+      } catch (error) {
+        console.error('Error adding booking:', error);
+        alert('Error adding booking: ' + error.message);
       }
     }
 
     async function removeVitalnyaBooking(id) {
-      await supabaseClient.from('vitalnya_bookings').delete().eq('id', id);
-      state.vitalnyaBookings = state.vitalnyaBookings.filter(b => b.id !== id);
-      render();
+      try {
+        await supabaseClient.from('vitalnya_bookings').delete().eq('id', id);
+        state.vitalnyaBookings = state.vitalnyaBookings.filter(b => b.id !== id);
+        render();
+      } catch (error) {
+        console.error('Error removing booking:', error);
+        alert('Error removing booking: ' + error.message);
+      }
     }
 
     // ============ HELPER FUNCTIONS ============
@@ -504,8 +619,11 @@
     }
 
     function renderTrash() {
-      const currentPerson = state.trashQueue[0] ? getPersonName(state.trashQueue[0].person_id) : null;
       const isCompleted = isTrashCompletedToday();
+      // Show the person who completed it today, or the first in queue
+      const currentPerson = isCompleted 
+        ? getPersonName(state.trashCompletion.completed_by)
+        : (state.trashQueue[0] ? getPersonName(state.trashQueue[0].person_id) : null);
       
       return `
         <!-- Current person banner -->
@@ -517,7 +635,7 @@
                 <p class="text-3xl font-bold text-green-700">${currentPerson}</p>
               </div>
               ${isCompleted ? `
-                <div class="px-6 py-3 bg-green-100 text-green-800 rounded-lg font-medium">✓ Completed</div>
+                <button onclick="unmarkTrashDone()" class="px-6 py-3 bg-green-100 text-green-800 rounded-lg font-medium hover:bg-green-200 transition-colors">✓ Completed (click to undo)</button>
               ` : `
                 <button onclick="markTrashDone()" class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium">
                   Mark as Done
