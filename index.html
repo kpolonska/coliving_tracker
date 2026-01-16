@@ -191,6 +191,7 @@
         if (!confirm('Remove this person? They will also be removed from all queues and groups.')) return;
         
         // Delete from all related tables first
+        await supabaseClient.from('trash_completions').delete().eq('completed_by', id);
         await supabaseClient.from('trash_queue').delete().eq('person_id', id);
         await supabaseClient.from('birthdays').delete().eq('person_id', id);
         await supabaseClient.from('cleaning_group_members').delete().eq('person_id', id);
