@@ -178,9 +178,8 @@
       try {
         const { data, error } = await supabaseClient.from('people').insert({ name }).select().single();
         if (error) throw error;
-        state.people.push(data);
         input.value = '';
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error adding person:', error);
         alert('Error adding person: ' + error.message);
@@ -190,15 +189,16 @@
     async function removePerson(id) {
       try {
         if (!confirm('Remove this person? They will also be removed from all queues and groups.')) return;
-        await supabaseClient.from('people').delete().eq('id', id);
-        state.people = state.people.filter(p => p.id !== id);
-        state.trashQueue = state.trashQueue.filter(t => t.person_id !== id);
-        state.birthdays = state.birthdays.filter(b => b.person_id !== id);
-        state.cleaningGroups = state.cleaningGroups.map(g => ({
-          ...g,
-          members: g.members.filter(m => m !== id)
-        })).filter(g => g.members.length > 0);
-        render();
+        
+        // Delete from all related tables first
+        await supabaseClient.from('trash_queue').delete().eq('person_id', id);
+        await supabaseClient.from('birthdays').delete().eq('person_id', id);
+        await supabaseClient.from('cleaning_group_members').delete().eq('person_id', id);
+        
+        const { error } = await supabaseClient.from('people').delete().eq('id', id);
+        if (error) throw error;
+        
+        await loadAllData();
       } catch (error) {
         console.error('Error removing person:', error);
         alert('Error removing person: ' + error.message);
@@ -209,10 +209,9 @@
     async function addToTrashQueue(personId) {
       try {
         const position = state.trashQueue.length;
-        const { data, error } = await supabaseClient.from('trash_queue').insert({ person_id: personId, position }).select().single();
+        const { error } = await supabaseClient.from('trash_queue').insert({ person_id: personId, position });
         if (error) throw error;
-        state.trashQueue.push(data);
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error adding to queue:', error);
         alert('Error adding to queue: ' + error.message);
@@ -221,21 +220,18 @@
 
     async function insertIntoTrashQueue(personId, afterIndex) {
       try {
-        const newItem = { person_id: personId, position: afterIndex };
-        
         // Clear and rebuild the queue in database
         await supabaseClient.from('trash_queue').delete().neq('id', 0);
         
         const inserts = [
           ...state.trashQueue.slice(0, afterIndex).map((q, i) => ({ person_id: q.person_id, position: i })),
-          newItem,
+          { person_id: personId, position: afterIndex },
           ...state.trashQueue.slice(afterIndex).map((q, i) => ({ person_id: q.person_id, position: afterIndex + 1 + i }))
         ];
         
-        const { data, error } = await supabaseClient.from('trash_queue').insert(inserts).select();
+        const { error } = await supabaseClient.from('trash_queue').insert(inserts);
         if (error) throw error;
-        state.trashQueue = data || [];
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error inserting into queue:', error);
         alert('Error inserting into queue: ' + error.message);
@@ -244,14 +240,16 @@
 
     async function removeFromTrashQueue(id) {
       try {
-        await supabaseClient.from('trash_queue').delete().eq('id', id);
-        state.trashQueue = state.trashQueue.filter(t => t.id !== id);
-        // Reorder positions
-        for (let i = 0; i < state.trashQueue.length; i++) {
-          state.trashQueue[i].position = i;
-          await supabaseClient.from('trash_queue').update({ position: i }).eq('id', state.trashQueue[i].id);
+        const { error } = await supabaseClient.from('trash_queue').delete().eq('id', id);
+        if (error) throw error;
+        
+        // Reorder remaining items
+        const remaining = state.trashQueue.filter(t => t.id !== id);
+        for (let i = 0; i < remaining.length; i++) {
+          await supabaseClient.from('trash_queue').update({ position: i }).eq('id', remaining[i].id);
         }
-        render();
+        
+        await loadAllData();
       } catch (error) {
         console.error('Error removing from queue:', error);
         alert('Error removing from queue: ' + error.message);
@@ -263,13 +261,14 @@
         const today = new Date().toISOString().split('T')[0];
         const currentPerson = state.trashQueue[0]?.person_id;
         
+        if (!currentPerson) return;
+        
         // Save who completed it today
-        await supabaseClient.from('trash_completions').upsert({ 
+        const { error: completionError } = await supabaseClient.from('trash_completions').upsert({ 
           completed_date: today, 
           completed_by: currentPerson 
         }, { onConflict: 'completed_date' });
-        
-        state.trashCompletion = { completed_date: today, completed_by: currentPerson };
+        if (completionError) throw completionError;
         
         // Rotate the queue: move first person to the end
         if (state.trashQueue.length > 1) {
@@ -279,12 +278,10 @@
           // Update positions in database
           for (let i = 0; i < newQueue.length; i++) {
             await supabaseClient.from('trash_queue').update({ position: i }).eq('id', newQueue[i].id);
-            newQueue[i].position = i;
           }
-          state.trashQueue = newQueue;
         }
         
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error marking trash done:', error);
         alert('Error marking trash done: ' + error.message);
@@ -307,16 +304,15 @@
           // Update positions in database
           for (let i = 0; i < state.trashQueue.length; i++) {
             await supabaseClient.from('trash_queue').update({ position: i }).eq('id', state.trashQueue[i].id);
-            state.trashQueue[i].position = i;
           }
         }
         
         // Delete today's completion
         const today = new Date().toISOString().split('T')[0];
-        await supabaseClient.from('trash_completions').delete().eq('completed_date', today);
-        state.trashCompletion = null;
+        const { error } = await supabaseClient.from('trash_completions').delete().eq('completed_date', today);
+        if (error) throw error;
         
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error unmarking trash:', error);
         alert('Error unmarking trash: ' + error.message);
@@ -347,15 +343,11 @@
         if (error) throw error;
         
         const memberInserts = memberIds.map(person_id => ({ group_id: group.id, person_id }));
-        await supabaseClient.from('cleaning_group_members').insert(memberInserts);
+        const { error: memberError } = await supabaseClient.from('cleaning_group_members').insert(memberInserts);
+        if (memberError) throw memberError;
         
-        state.cleaningGroups.push({ ...group, members: memberIds });
         nameInput.value = '';
-        
-        // Uncheck all checkboxes
-        checkboxes.forEach(cb => cb.checked = false);
-        
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error creating group:', error);
         alert('Error creating group: ' + error.message);
@@ -364,14 +356,20 @@
 
     async function removeCleaningGroup(id) {
       try {
-        await supabaseClient.from('cleaning_groups').delete().eq('id', id);
-        state.cleaningGroups = state.cleaningGroups.filter(g => g.id !== id);
+        if (!confirm('Remove this cleaning group?')) return;
+        
+        // Delete members first
+        await supabaseClient.from('cleaning_group_members').delete().eq('group_id', id);
+        
+        const { error } = await supabaseClient.from('cleaning_groups').delete().eq('id', id);
+        if (error) throw error;
+        
+        // Clear schedule if this group was the start group
         if (state.cleaningSettings.start_group_id === id) {
-          state.cleaningSettings.start_group_id = null;
-          state.cleaningSettings.start_date = null;
           await supabaseClient.from('cleaning_settings').update({ start_date: null, start_group_id: null }).eq('id', 1);
         }
-        render();
+        
+        await loadAllData();
       } catch (error) {
         console.error('Error removing group:', error);
         alert('Error removing group: ' + error.message);
@@ -381,15 +379,15 @@
     async function saveCleaningSettings() {
       try {
         const startDate = document.getElementById('cleaningStartDate').value;
-        const startGroupId = parseInt(document.getElementById('cleaningStartGroup').value);
+        const startGroupId = parseInt(document.getElementById('cleaningStartGroup').value) || null;
         
-        await supabaseClient.from('cleaning_settings').update({ 
+        const { error } = await supabaseClient.from('cleaning_settings').update({ 
           start_date: startDate || null, 
-          start_group_id: startGroupId || null 
+          start_group_id: startGroupId 
         }).eq('id', 1);
+        if (error) throw error;
         
-        state.cleaningSettings = { start_date: startDate || null, start_group_id: startGroupId || null };
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error saving settings:', error);
         alert('Error saving settings: ' + error.message);
@@ -398,16 +396,15 @@
 
     async function postponeCleaning(originalDate, newDate, groupId, groupName) {
       try {
-        const { data, error } = await supabaseClient.from('cleaning_postponements').insert({
+        const { error } = await supabaseClient.from('cleaning_postponements').insert({
           original_date: originalDate,
           new_date: newDate,
           group_id: groupId,
           group_name: groupName
-        }).select().single();
-        
+        });
         if (error) throw error;
-        state.cleaningPostponements.push(data);
-        render();
+        
+        await loadAllData();
       } catch (error) {
         console.error('Error postponing:', error);
         alert('Error postponing: ' + error.message);
@@ -416,9 +413,10 @@
 
     async function cancelPostponement(id) {
       try {
-        await supabaseClient.from('cleaning_postponements').delete().eq('id', id);
-        state.cleaningPostponements = state.cleaningPostponements.filter(p => p.id !== id);
-        render();
+        const { error } = await supabaseClient.from('cleaning_postponements').delete().eq('id', id);
+        if (error) throw error;
+        
+        await loadAllData();
       } catch (error) {
         console.error('Error canceling postponement:', error);
         alert('Error canceling postponement: ' + error.message);
@@ -429,20 +427,19 @@
     async function setBirthday(personId, date) {
       try {
         if (!date) {
-          await supabaseClient.from('birthdays').delete().eq('person_id', personId);
-          state.birthdays = state.birthdays.filter(b => b.person_id !== personId);
+          const { error } = await supabaseClient.from('birthdays').delete().eq('person_id', personId);
+          if (error) throw error;
         } else {
           const existing = state.birthdays.find(b => b.person_id === personId);
           if (existing) {
-            await supabaseClient.from('birthdays').update({ birth_date: date }).eq('person_id', personId);
-            existing.birth_date = date;
-          } else {
-            const { data, error } = await supabaseClient.from('birthdays').insert({ person_id: personId, birth_date: date }).select().single();
+            const { error } = await supabaseClient.from('birthdays').update({ birth_date: date }).eq('person_id', personId);
             if (error) throw error;
-            if (data) state.birthdays.push(data);
+          } else {
+            const { error } = await supabaseClient.from('birthdays').insert({ person_id: personId, birth_date: date });
+            if (error) throw error;
           }
         }
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error setting birthday:', error);
         alert('Error setting birthday: ' + error.message);
@@ -460,16 +457,14 @@
         
         if (!date || !timeStart || !timeEnd || !name) return;
         
-        const { data, error } = await supabaseClient.from('vitalnya_bookings').insert({
+        const { error } = await supabaseClient.from('vitalnya_bookings').insert({
           booking_date: date,
           time_start: timeStart,
           time_end: timeEnd,
           name,
           strict
-        }).select().single();
-        
+        });
         if (error) throw error;
-        state.vitalnyaBookings.push(data);
         
         document.getElementById('vitalnyaDate').value = '';
         document.getElementById('vitalnyaTimeStart').value = '';
@@ -477,7 +472,7 @@
         document.getElementById('vitalnyaName').value = '';
         document.getElementById('vitalnyaStrict').checked = false;
         
-        render();
+        await loadAllData();
       } catch (error) {
         console.error('Error adding booking:', error);
         alert('Error adding booking: ' + error.message);
@@ -486,9 +481,10 @@
 
     async function removeVitalnyaBooking(id) {
       try {
-        await supabaseClient.from('vitalnya_bookings').delete().eq('id', id);
-        state.vitalnyaBookings = state.vitalnyaBookings.filter(b => b.id !== id);
-        render();
+        const { error } = await supabaseClient.from('vitalnya_bookings').delete().eq('id', id);
+        if (error) throw error;
+        
+        await loadAllData();
       } catch (error) {
         console.error('Error removing booking:', error);
         alert('Error removing booking: ' + error.message);
@@ -620,13 +616,11 @@
 
     function renderTrash() {
       const isCompleted = isTrashCompletedToday();
-      // Show the person who completed it today, or the first in queue
       const currentPerson = isCompleted 
         ? getPersonName(state.trashCompletion.completed_by)
         : (state.trashQueue[0] ? getPersonName(state.trashQueue[0].person_id) : null);
       
       return `
-        <!-- Current person banner -->
         <div class="mb-6 p-6 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border-2 border-green-200">
           ${currentPerson ? `
             <div class="flex items-center justify-between flex-wrap gap-4">
@@ -648,7 +642,6 @@
         </div>
 
         <div class="grid md:grid-cols-2 gap-6">
-          <!-- Queue List -->
           <div>
             <h3 class="font-bold text-lg mb-3 text-gray-800">Queue Order</h3>
             ${state.trashQueue.length === 0 ? `
@@ -677,7 +670,6 @@
             `}
           </div>
 
-          <!-- Add to Queue -->
           <div>
             <h3 class="font-bold text-lg mb-3 text-gray-800">Add to End of Queue</h3>
             ${state.people.length === 0 ? `
@@ -859,12 +851,10 @@
 
       let calendarDays = '';
       
-      // Empty cells before first day
       for (let i = 0; i < startingDay; i++) {
         calendarDays += '<div class="p-1 min-h-20"></div>';
       }
       
-      // Days of month
       for (let day = 1; day <= daysInMonth; day++) {
         const date = new Date(year, month, day);
         const isToday = date.toDateString() === today.toDateString();
@@ -936,7 +926,6 @@
           </div>
         </div>
         
-        <!-- Postpone Modal -->
         <div id="postponeModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
           <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
             <h3 class="font-bold text-lg mb-4 text-gray-800">Postpone Cleaning</h3>
